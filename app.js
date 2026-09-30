@@ -778,6 +778,7 @@ function bindPedidoTab(P){
     dz.ondragover = e => { e.preventDefault(); dz.style.borderColor='var(--accent)'; };
     dz.ondragleave = () => dz.style.borderColor='';
     dz.ondrop = e => { e.preventDefault(); uploadFotos(P, Array.from(e.dataTransfer.files).filter(f=>f.type.startsWith('image/'))); };
+    $$('[data-ver]').forEach(d => d.onclick = e => { if(e.target.closest('[data-fdel]')) return; verFoto(P.id, d.dataset.ver); });
     $$('[data-fdel]').forEach(b => b.onclick = async e => { e.stopPropagation(); if(await confirmBox('¿Eliminar esta foto? También se borra de Drive.','Eliminar')) run('deleteFoto', {id:b.dataset.fdel}, 'Foto eliminada'); });
   }
   if(tab==='recs'){ bindRecForm('pr_', 'pedido|'+P.id); bindRecs($('#modal')); }
@@ -832,9 +833,9 @@ function tabNotas(P){
 function tabFotos(P){
   const l = S.d.Fotos.filter(x=>x.pedidoId===P.id);
   return `<input type="file" id="fileIn" accept="image/*" multiple class="hidden">
-    <div class="drop" id="drop" style="margin-bottom:14px"><b>📷 Subir fotos</b><div class="small">Tocá para elegir o arrastrá acá. Se comprimen solas y se guardan en Drive, con su link en la hoja “Fotos”.</div></div>
+    <div class="drop" id="drop" style="margin-bottom:14px"><b>📷 Subir fotos</b><div class="small">Tocá para elegir o arrastrá acá. Se achican solas (~200 KB c/u) y quedan en Drive, con su link en la hoja “Fotos”.</div></div>
     ${P.carpetaUrl?`<p class="small"><a target="_blank" rel="noopener noreferrer" href="${esc(P.carpetaUrl)}">📁 Abrir carpeta del pedido en Drive</a></p>`:''}
-    <div class="photos">${l.map(f=>`<div class="ph">${f.miniatura?`<img src="${esc(f.miniatura)}" alt="">`:'<div class="empty">🖼</div>'}<a class="open" target="_blank" rel="noopener noreferrer" href="${esc(f.url)}">Ver foto</a><button class="del" data-fdel="${esc(f.id)}">✕</button></div>`).join('')}</div>
+    <div class="photos">${l.map(f=>`<div class="ph" data-ver="${esc(f.id)}" title="Ver en grande">${f.miniatura?`<img src="${esc(f.miniatura)}" alt="">`:'<div class="empty">🖼</div>'}<span class="open">🔍 Ver</span><button class="del" data-fdel="${esc(f.id)}">✕</button></div>`).join('')}</div>
     ${!l.length?'<p class="muted">Sin fotos todavía: tela elegida, referencias, avance en el taller, entrega…</p>':''}`;
 }
 function tabRecs(P){
@@ -866,13 +867,49 @@ function resize(img, max, q){
   const cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0,0,cv.width,cv.height); cx.drawImage(img, 0, 0, cv.width, cv.height);
   return cv.toDataURL('image/jpeg', q);
 }
+/** Achica la foto para que pese ~250 KB o menos (se ve bien en pantalla y no llena el Drive). */
+function achicar(img){
+  let max = 1280, q = 0.72, d = resize(img, max, q);
+  while(d.length > 340000 && q > 0.45){ q -= 0.08; d = resize(img, max, q); }
+  while(d.length > 340000 && max > 800){ max -= 160; d = resize(img, max, q); }
+  return d;
+}
+
+/* ===== Visor de fotos en grande ===== */
+const FOTO_CACHE = {};
+async function verFoto(pedidoId, fotoId){
+  const lista = S.d.Fotos.filter(x => x.pedidoId===pedidoId);
+  let i = Math.max(0, lista.findIndex(x => x.id===fotoId));
+  let lb = $('#lightbox');
+  if(!lb){ lb = document.createElement('div'); lb.id = 'lightbox'; document.body.appendChild(lb); }
+  const cerrar = () => { lb.classList.add('hidden'); document.removeEventListener('keydown', teclas); };
+  const teclas = e => { if(e.key==='Escape') cerrar(); if(e.key==='ArrowRight') mover(1); if(e.key==='ArrowLeft') mover(-1); };
+  const mover = n => { if(lista.length < 2) return; i = (i + n + lista.length) % lista.length; mostrar(); };
+  async function mostrar(){
+    const f = lista[i];
+    lb.innerHTML = `<div class="lb-top"><span>${i+1} / ${lista.length} · ${esc(f.nombre||'')}</span><span class="spacer"></span>
+      <a class="btn sm" target="_blank" rel="noopener noreferrer" href="${esc(f.url)}">Abrir en Drive</a><button class="btn sm" data-lb="x">✕ Cerrar</button></div>
+      ${lista.length>1?'<button class="lb-nav prev" data-lb="p">‹</button><button class="lb-nav next" data-lb="n">›</button>':''}
+      <div class="lb-img">${f.miniatura?`<img src="${esc(f.miniatura)}" class="blur" alt="">`:''}<div class="lb-load">Cargando…</div></div>`;
+    lb.classList.remove('hidden');
+    try{
+      if(!FOTO_CACHE[f.id]) FOTO_CACHE[f.id] = (await call('getFoto', {id:f.id})).dataUrl;
+      if(lista[i]!==f) return;
+      $('.lb-img', lb).innerHTML = `<img src="${esc(FOTO_CACHE[f.id])}" alt="">`;
+    }catch(e){ const l = $('.lb-load', lb); if(l) l.textContent = e.message; }
+  }
+  lb.onclick = e => { const a = e.target.dataset.lb; if(a==='x' || e.target===lb) cerrar(); if(a==='p') mover(-1); if(a==='n') mover(1); };
+  document.addEventListener('keydown', teclas);
+  mostrar();
+}
+
 async function uploadFotos(P, files){
   if(!files.length) return;
   for(let i=0;i < files.length;i++){
     toast(`Subiendo foto ${i+1} de ${files.length}…`);
     try{
       const img = await loadImg(files[i]);
-      const full = resize(img, 1600, 0.82);
+      const full = achicar(img);
       let thumb = resize(img, 240, 0.6); if(thumb.length > 45000) thumb = resize(img, 160, 0.5);
       await run('uploadFoto', {pedidoId:P.id, nombre:files[i].name, dataUrl:full, thumb});
     }catch(e){ /* toast ya mostrado */ }
