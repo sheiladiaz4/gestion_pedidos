@@ -3,8 +3,8 @@
 if (window.top !== window.self) { try { window.top.location = window.self.location.href; } catch (e) { document.documentElement.innerHTML = ''; } }
 
 /* ================== Estado y utilidades ================== */
-const ETAPAS = ['Consulta','Presupuesto Enviado','Seña Confirmada','En Producción','Listo para Entrega','Entregado'];
-const ETAPA_COLOR = {'Consulta':'#A89C90','Presupuesto Enviado':'#3F6A8A','Seña Confirmada':'#B7791F','En Producción':'#9C5A33','Listo para Entrega':'#6B5B95','Entregado':'#4E7A4A'};
+const ETAPAS = ['Consulta','Presupuesto Enviado','Confirmado','En Producción','Listo para Entrega','Entregado'];
+const ETAPA_COLOR = {'Consulta':'#A89C90','Presupuesto Enviado':'#3F6A8A','Confirmado':'#B7791F','En Producción':'#9C5A33','Listo para Entrega':'#6B5B95','Entregado':'#4E7A4A'};
 const TIPOS = ['Sillón/Sofá','Mueble a Medida','Producto del local'];
 const VIEWS = [
   {id:'pipeline', icon:'▦', label:'Pipeline'},
@@ -95,11 +95,38 @@ function confirmBox(msg, okLabel){
 }
 
 /* ================== Cálculos ================== */
+/* Forma de pago → tipo de ajuste: 'desc' descuento al cliente · 'com' comisión que absorbe RUMA · '' sin ajuste */
+const FORMAS_PAGO = ['Efectivo', 'Transferencia', 'Mercado Pago (cuotas)', 'Open Pay (cuotas)', 'Otro'];
+function tipoAjuste(forma){ forma = String(forma||'').toLowerCase(); if(/cuota|mercado|open ?pay|tarjeta/.test(forma)) return 'com'; if(/efectivo|transfer/.test(forma)) return 'desc'; return ''; }
+/** Precio al cliente y total a recibir según lista, forma de pago y % */
+function precios(lista, forma, pct){
+  lista = num(lista); pct = Math.min(Math.max(num(pct),0),100); const t = tipoAjuste(forma);
+  if(t==='desc'){ const cli = Math.round(lista*(1-pct/100)); return {cliente:cli, recibir:cli, ajuste:lista-cli, tipo:t}; }
+  if(t==='com'){ const rec = Math.round(lista*(1-pct/100)); return {cliente:lista, recibir:rec, ajuste:lista-rec, tipo:t}; }
+  return {cliente:lista, recibir:lista, ajuste:0, tipo:''};
+}
 function calc(p){
   const pagado = S.d.Pagos.filter(x => x.pedidoId===p.id).reduce((a,x)=>a+num(x.monto),0);
   const costos = S.d.Costos.filter(x => x.pedidoId===p.id).reduce((a,x)=>a+num(x.monto),0);
   const precio = num(p.precioTotal);
-  return {precio, pagado, saldo: precio-pagado, costos, ganancia: precio-costos};
+  const recibir = p.totalRecibir!=='' && p.totalRecibir!==undefined ? num(p.totalRecibir) : precio;
+  return {precio, pagado, saldo: precio-pagado, costos, recibir, ganancia: recibir-costos};
+}
+const medidasTxt = p => { const m = [p.largo, p.profundidad, p.alto].map(num); return m.some(Boolean) ? m.map(x => x||'–').join(' × ') + ' cm' : (p.medidas||''); };
+const cap1 = s => { s = String(s||'').toLowerCase(); return s.charAt(0).toUpperCase() + s.slice(1); };
+function productoTexto(p){
+  if(p.tipo==='Sillón/Sofá') return 'sillón' + (p.modelo ? ' ' + cap1(p.modelo) : '');
+  if(p.tipo==='Mueble a Medida') return 'mueble a medida' + (p.madera ? ' en ' + String(p.madera).toLowerCase() : '');
+  return p.modelo ? cap1(p.modelo) : 'compra';
+}
+const DEF_MSG_RESENA = '¡Hola {nombre}! ¿Cómo estás? 😊 Te escribimos de RUMA. Ya pasaron un par de semanas desde que recibiste tu {producto} y queríamos saber cómo te resultó. ¿Lo estás disfrutando?\n\nSi te gustó, nos ayudarías un montón dejándonos una reseña en Google (es 1 minuto y a otras personas les sirve muchísimo):\n{link}\n\n¡Gracias por elegirnos! 🧡';
+function mensajeResena(p){
+  const c = cliente(p) || {};
+  const nombre = cap1(String(c.nombre || p.clienteNombre || '').trim().split(/\s+/)[0]);
+  const link = cfg('linkResena')[0] || '';
+  let t = (cfg('mensajeResena')[0] || DEF_MSG_RESENA);
+  t = t.replace(/\{nombre\}/g, nombre).replace(/\{producto\}/g, productoTexto(p)).replace(/\{link\}/g, link);
+  return t.replace(/\n{3,}/g, '\n\n').trim();
 }
 const idxEtapa = p => ETAPAS.indexOf(p.etapa);
 const isPerdido = p => isSi(p.perdido);
@@ -107,7 +134,7 @@ const isActivo = p => !isPerdido(p) && p.etapa!=='Entregado';
 const isGanado = p => !isPerdido(p) && idxEtapa(p)>=2;
 const isAtrasado = p => isActivo(p) && p.fechaEntregaEstimada && p.fechaEntregaEstimada < today();
 const cliente = p => p.clienteId ? byId('Clientes', p.clienteId) : null;
-const descProd = p => p.tipo==='Mueble a Medida' ? [p.madera, p.terminacion, p.medidas].filter(Boolean).join(' · ') : [p.modelo, [p.tela,p.color].filter(Boolean).join(' '), p.medidas].filter(Boolean).join(' · ');
+const descProd = p => p.tipo==='Mueble a Medida' ? [p.madera, p.terminacion, medidasTxt(p)].filter(Boolean).join(' · ') : [p.modelo, [p.tela,p.color].filter(Boolean).join(' '), medidasTxt(p)].filter(Boolean).join(' · ');
 const recsVencidos = () => S.d.Recordatorios.filter(r => !isSi(r.hecho) && r.fecha < today());
 
 function waLink(tel, text){
@@ -152,7 +179,7 @@ function filtraPedidos(list){
     if(S.fCom && p.comercial!==S.fCom) return false;
     if(!q) return true;
     const c = cliente(p) || {};
-    return [p.id, p.clienteNombre, p.modelo, p.tela, p.color, p.madera, p.medidas, p.detalles, c.telefono, c.email].join(' ').toLowerCase().includes(q);
+    return [p.id, p.clienteNombre, p.modelo, p.tela, p.color, p.madera, medidasTxt(p), p.detalles, c.telefono, c.email].join(' ').toLowerCase().includes(q);
   });
 }
 function topFilters(){
@@ -222,8 +249,8 @@ function bindBoard(){
     c.ondragend = () => c.classList.remove('dragging');
   });
   $$('[data-adv]').forEach(b => b.onclick = e => {
-    e.stopPropagation(); const p = byId('Pedidos', b.dataset.adv);
-    run('setEtapa', {id:p.id, etapa: ETAPAS[idxEtapa(p)+1]}, `${p.id} → ${ETAPAS[idxEtapa(p)+1]}`);
+    e.stopPropagation(); const p = byId('Pedidos', b.dataset.adv); const et = ETAPAS[idxEtapa(p)+1];
+    run('setEtapa', {id:p.id, etapa: et}, `${p.id} → ${et}`).then(() => despuesDeEtapa(p.id, et));
   });
   $$('.col').forEach(col => {
     col.ondragover = e => { e.preventDefault(); col.classList.add('over'); };
@@ -233,10 +260,35 @@ function bindBoard(){
       const id = e.dataTransfer.getData('text/plain'); const p = byId('Pedidos', id);
       if(p && p.etapa!==col.dataset.etapa){
         const prev = p.etapa; p.etapa = col.dataset.etapa; render(); // optimista
-        run('setEtapa', {id, etapa: col.dataset.etapa}, `${id} → ${col.dataset.etapa}`).catch(() => { p.etapa = prev; render(); });
+        const et = col.dataset.etapa;
+        run('setEtapa', {id, etapa: et}, `${id} → ${et}`).then(() => despuesDeEtapa(id, et)).catch(() => { p.etapa = prev; render(); });
       }
     };
   });
+}
+
+/** Al pasar a Confirmado sin pagos, ofrece registrar la seña. */
+function despuesDeEtapa(id, etapa){
+  if(etapa!=='Confirmado') return;
+  const p = byId('Pedidos', id); if(!p || S.d.Pagos.some(x => x.pedidoId===id)) return;
+  askSena(p);
+}
+function askSena(p){
+  const m = $('#modal2');
+  m.innerHTML = `<div class="modal-card narrow"><div class="modal-head"><h2>Registrar seña · ${esc(p.id)}</h2><button class="x" data-close>×</button></div><div class="modal-body grid">
+    <p class="small muted" style="margin:0">${esc(p.clienteNombre)} · ${esc(descProd(p))} · Precio ${money(p.precioTotal)}</p>
+    <label class="f"><span>Monto de la seña</span><input type="number" id="sn_m" min="0" placeholder="$"></label>
+    <label class="f"><span>Medio</span><select id="sn_me">${opts(cfg('medios'), p.formaPago)}</select></label>
+    <label class="f"><span>Fecha</span><input type="date" id="sn_f" value="${today()}"></label>
+    <div class="row"><span class="spacer"></span><button class="btn" data-close>Ahora no</button><button class="btn pri" id="sn_ok">Registrar seña</button></div></div></div>`;
+  m.classList.remove('hidden');
+  m.onclick = e => { if(e.target===m || e.target.dataset.close!==undefined) m.classList.add('hidden'); };
+  setTimeout(() => $('#sn_m').focus(), 50);
+  $('#sn_ok').onclick = async () => {
+    const monto = num($('#sn_m').value); if(!(monto>0)) return toast('Poné el monto de la seña', true);
+    await run('addPago', {pago:{pedidoId:p.id, monto, medio:$('#sn_me').value, fecha:$('#sn_f').value, nota:'Seña'}}, 'Seña registrada');
+    m.classList.add('hidden');
+  };
 }
 
 /* ================== Calendario ================== */
@@ -254,8 +306,9 @@ function renderCalendario(v){
     if(p.etapa==='Entregado') add(p.fechaEntregaReal, `<div class="ev done" data-ped="${esc(p.id)}">✔ ${esc(p.clienteNombre)}</div>`);
     else add(p.fechaEntregaEstimada, `<div class="ev ${isAtrasado(p)?'late':'ent'}" data-ped="${esc(p.id)}">🚚 ${esc(p.clienteNombre)} · ${esc(p.modelo||p.tipo||'')}</div>`);
   });
-  S.d.Recordatorios.filter(r=>!isSi(r.hecho)).forEach(r => add(r.fecha, `<div class="ev rec" data-rec="${esc(r.id)}">⏰ ${esc(r.texto)}</div>`));
-  let html = `<div class="row small muted" style="margin-bottom:10px;gap:14px"><span class="ev ent">Entrega estimada</span><span class="ev late">Atrasada</span><span class="ev done">Entregado</span><span class="ev rec">Recordatorio</span></div><div class="cal">`;
+  S.d.Recordatorios.filter(r=>!isSi(r.hecho)).forEach(r => add(r.fecha, `<div class="ev rec" data-rec="${esc(r.id)}">${r.tipo==='resena'?'⭐':'⏰'} ${esc(r.texto)}</div>`));
+  S.d.Costos.filter(c=>c.fechaPago && !isSi(c.pagado)).forEach(c => add(c.fechaPago, `<div class="ev pay ${c.fechaPago < today()?'late':''}" data-pay="${esc(c.proveedorId||'')}" data-payped="${esc(c.pedidoId||'')}">💸 ${money(c.monto)} · ${esc(c.proveedorNombre||'Proveedor')}</div>`));
+  let html = `<div class="row small muted" style="margin-bottom:10px;gap:14px"><span class="ev ent">Entrega estimada</span><span class="ev late">Atrasada</span><span class="ev done">Entregado</span><span class="ev rec">Recordatorio</span><span class="ev pay">Pago a proveedor</span></div><div class="cal">`;
   html += ['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'].map(d=>`<div class="dow">${d}</div>`).join('');
   const t = today();
   for(let i=0;i<42;i++){
@@ -266,6 +319,7 @@ function renderCalendario(v){
   $('#view').innerHTML = html + '</div>';
   $$('[data-ped]').forEach(e => e.onclick = () => openPedido(e.dataset.ped));
   $$('[data-rec]').forEach(e => e.onclick = () => openRecordatorio(e.dataset.rec));
+  $$('[data-pay]').forEach(e => e.onclick = () => e.dataset.pay ? openProveedor(e.dataset.pay) : e.dataset.payped && openPedido(e.dataset.payped, {tab:'costos'}));
 }
 
 /* ================== Entregas ================== */
@@ -306,12 +360,20 @@ function vinculoOptions(sel){
     <optgroup label="Clientes">${S.d.Clientes.slice().sort((a,b)=>a.nombre.localeCompare(b.nombre)).map(c=>`<option value="cliente|${esc(c.id)}" ${sel==='cliente|'+c.id?'selected':''}>${esc(c.nombre)}</option>`).join('')}</optgroup>
     <optgroup label="Proveedores">${S.d.Proveedores.map(v=>`<option value="proveedor|${esc(v.id)}" ${sel==='proveedor|'+v.id?'selected':''}>${esc(v.nombre)}</option>`).join('')}</optgroup>`;
 }
+function resenaBtns(r){
+  if(r.tipo!=='resena' || r.vinculoTipo!=='pedido') return '';
+  const p = byId('Pedidos', r.vinculoId); if(!p) return '';
+  const c = cliente(p) || {};
+  const sinLink = !cfg('linkResena')[0] ? '<div class="small" style="color:var(--warn)">Falta cargar el link de reseñas de Google en Ajustes.</div>' : '';
+  if(!c.telefono) return `<div class="small muted">El cliente no tiene teléfono cargado.</div>${sinLink}`;
+  return `<div class="row" style="margin-top:6px"><a class="btn sm wa" target="_blank" rel="noopener noreferrer" data-resena="${esc(r.id)}" href="${waLink(c.telefono, mensajeResena(p))}">💬 Enviar mensaje por WhatsApp</a><button class="btn sm" data-copy="${esc(r.id)}">Copiar mensaje</button></div>${sinLink}`;
+}
 function recItem(r){
   const late = !isSi(r.hecho) && r.fecha < today();
   const vl = vinculoLabel(r);
   return `<div class="item ${isSi(r.hecho)?'done':''} ${late?'late':''}">
     <input type="checkbox" ${isSi(r.hecho)?'checked':''} data-rtog="${esc(r.id)}" title="Marcar como hecho">
-    <div class="t"><div>${esc(r.texto)}</div><div class="small muted">${fmtD(r.fecha)}${late?` · <b style="color:var(--bad)">vencido hace ${-diasHasta(r.fecha)} días</b>`:''}${vl?` · <a href="#" data-rlink="${esc(r.vinculoTipo+'|'+r.vinculoId)}">${esc(vl)}</a>`:''}</div></div>
+    <div class="t"><div>${r.tipo==='resena'?'⭐ ':''}${esc(r.texto)}</div><div class="small muted">${fmtD(r.fecha)}${late?` · <b style="color:var(--bad)">vencido hace ${-diasHasta(r.fecha)} días</b>`:''}${vl?` · <a href="#" data-rlink="${esc(r.vinculoTipo+'|'+r.vinculoId)}">${esc(vl)}</a>`:''}</div>${isSi(r.hecho)?'':resenaBtns(r)}</div>
     <button class="btn sm ghost" data-redit="${esc(r.id)}">Editar</button><button class="btn sm ghost danger" data-rdel="${esc(r.id)}">✕</button></div>`;
 }
 function bindRecs(root){
@@ -319,6 +381,10 @@ function bindRecs(root){
   $$('[data-rdel]', root).forEach(b => b.onclick = async () => { if(await confirmBox('¿Eliminar este recordatorio?','Eliminar')) run('deleteRecordatorio', {id:b.dataset.rdel}, 'Recordatorio eliminado'); });
   $$('[data-redit]', root).forEach(b => b.onclick = () => openRecordatorio(b.dataset.redit));
   $$('[data-rlink]', root).forEach(a => a.onclick = e => { e.preventDefault(); const [t,id] = a.dataset.rlink.split('|'); t==='pedido'?openPedido(id):t==='cliente'?openCliente(id):openProveedor(id); });
+  // Al abrir WhatsApp con el mensaje de reseña, el recordatorio se marca como hecho
+  $$('[data-resena]', root).forEach(a => a.addEventListener('click', () => { const r = byId('Recordatorios', a.dataset.resena); if(r && !isSi(r.hecho)) setTimeout(() => run('toggleRecordatorio', {id:r.id}, 'Reseña pedida ✔'), 300); }));
+  $$('[data-copy]', root).forEach(b => b.onclick = async () => { const r = byId('Recordatorios', b.dataset.copy); const p = r && byId('Pedidos', r.vinculoId); if(!p) return;
+    try{ await navigator.clipboard.writeText(mensajeResena(p)); toast('Mensaje copiado'); }catch(e){ toast('No se pudo copiar', true); } });
 }
 function recForm(prefix, vinc){
   return `<div class="grid g4" style="align-items:end">
@@ -400,12 +466,14 @@ const readCliente = pre => ({nombre:$('#'+pre+'nombre').value.trim(), telefono:$
 function renderProveedores(v){
   setTop(v.label, `<button class="btn pri" data-act="nuevoProveedor">+ Nuevo proveedor</button>`);
   const rows = S.d.Proveedores.map(p => { const cs = S.d.Costos.filter(c=>c.proveedorId===p.id);
-    return {p, n: cs.length, total: cs.reduce((a,c)=>a+num(c.monto),0), deuda: cs.filter(c=>!isSi(c.pagado)).reduce((a,c)=>a+num(c.monto),0)}; })
+    const prox = cs.filter(c=>!isSi(c.pagado) && c.fechaPago).map(c=>c.fechaPago).sort()[0] || '';
+    return {p, n: cs.length, prox, total: cs.reduce((a,c)=>a+num(c.monto),0), deuda: cs.filter(c=>!isSi(c.pagado)).reduce((a,c)=>a+num(c.monto),0)}; })
     .sort((a,b)=>b.deuda-a.deuda || a.p.nombre.localeCompare(b.p.nombre));
-  $('#view').innerHTML = rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>Proveedor</th><th>Especialidad</th><th>Teléfono</th><th class="num">Trabajos</th><th class="num">Total</th><th class="num">Pendiente de pago</th></tr></thead><tbody>
-    ${rows.map(({p,n,total,deuda}) => `<tr class="click" data-prov="${esc(p.id)}"><td><b>${esc(p.nombre)}</b></td><td>${esc(p.especialidad||'—')}</td>
+  $('#view').innerHTML = rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>Proveedor</th><th>Especialidad</th><th>Teléfono</th><th class="num">Trabajos</th><th class="num">Total</th><th class="num">Pendiente de pago</th><th>Próximo pago</th></tr></thead><tbody>
+    ${rows.map(({p,n,total,deuda,prox}) => `<tr class="click" data-prov="${esc(p.id)}"><td><b>${esc(p.nombre)}</b></td><td>${esc(p.especialidad||'—')}</td>
       <td>${p.telefono?`<a target="_blank" rel="noopener noreferrer" href="${waLink(p.telefono)}">${esc(p.telefono)}</a>`:'—'}</td><td class="num">${n}</td><td class="num">${money(total)}</td>
-      <td class="num">${deuda>0?`<span class="tag bad">${money(deuda)}</span>`:'<span class="tag ok">Al día</span>'}</td></tr>`).join('')}
+      <td class="num">${deuda>0?`<span class="tag bad">${money(deuda)}</span>`:'<span class="tag ok">Al día</span>'}</td>
+      <td>${prox?`<span class="${prox < today()?'tag bad':''}">${fmtD(prox)}</span>`:'—'}</td></tr>`).join('')}
     </tbody></table></div>` : '<div class="empty">Cargá tus tapiceros, carpinteros, telas y fletes para seguir costos y pagos.</div>';
   $$('[data-prov]').forEach(r => r.onclick = e => fromLink(e) ? null : openProveedor(r.dataset.prov));
 }
@@ -448,11 +516,11 @@ function renderPanel(v){
     ${kpi('Saldo pendiente de cobro', money(saldo))}
     ${kpi('Entregas atrasadas', P.filter(isAtrasado).length, '', P.filter(isAtrasado).length?'bad':'ok')}
     ${kpi('Recordatorios vencidos', recsVencidos().length, '', recsVencidos().length?'bad':'ok')}
-    ${kpi('Tasa de conversión', conv + '%', `${gan.length} de ${perP.length} consultas llegaron a seña`)}
+    ${kpi('Tasa de conversión', conv + '%', `${gan.length} de ${perP.length} consultas se confirmaron`)}
     ${kpi('Ticket promedio', money(ticket), 'pedidos confirmados')}
     ${kpi('Cobrado en el período', money(cobrado))}
     ${kpi('Ventas entregadas', money(ventas), entreg.length + ' pedidos')}
-    ${kpi('Ganancia acumulada', money(ganancia), 'precio − costos de lo entregado', 'ok')}
+    ${kpi('Ganancia acumulada', money(ganancia), 'lo que recibís − costos, de lo entregado', 'ok')}
     ${kpi('A pagar a proveedores', money(debo), '', debo?'bad':'')}
     ${kpi('Perdidos', perd.length, perP.length ? Math.round(perd.length/perP.length*100)+'% de las consultas' : '')}
   </div><div class="grid g2">`;
@@ -461,9 +529,9 @@ function renderPanel(v){
   const now = new Date(); const months = [];
   for(let i=11;i>=0;i--){ const d = new Date(now.getFullYear(), now.getMonth()-i, 1); months.push({k: d.getFullYear()+'-'+pad(d.getMonth()+1), l: MESES[d.getMonth()], v:0, c:0}); }
   S.d.Pagos.forEach(x => { const mm = months.find(m => m.k===String(x.fecha).slice(0,7)); if(mm) mm.v += num(x.monto); });
-  P.filter(isGanado).forEach(p => { const h = S.d.Historial.find(h=>h.pedidoId===p.id && h.etapaNueva==='Seña Confirmada'); const f = (h && h.fecha) || p.fechaConsulta; const mm = months.find(m=>m.k===String(f).slice(0,7)); if(mm) mm.c++; });
+  P.filter(isGanado).forEach(p => { const h = S.d.Historial.find(h=>h.pedidoId===p.id && (h.etapaNueva==='Confirmado' || h.etapaNueva==='Seña Confirmada')); const f = (h && h.fecha) || p.fechaConsulta; const mm = months.find(m=>m.k===String(f).slice(0,7)); if(mm) mm.c++; });
   const mx = Math.max(1, ...months.map(m=>m.v));
-  html += `<div class="panel"><h3>Cobrado por mes <span class="muted small">(últimos 12 meses · nº = pedidos señados)</span></h3><div class="vbars">${months.map(m=>`<div class="b" title="${money(m.v)}"><em>${m.c||''}</em><i style="height:${m.v/mx*100}%"></i><span>${m.l}</span></div>`).join('')}</div></div>`;
+  html += `<div class="panel"><h3>Cobrado por mes <span class="muted small">(últimos 12 meses · nº = pedidos confirmados)</span></h3><div class="vbars">${months.map(m=>`<div class="b" title="${money(m.v)}"><em>${m.c||''}</em><i style="height:${m.v/mx*100}%"></i><span>${m.l}</span></div>`).join('')}</div></div>`;
   html += `<div class="panel"><h3>Modelos más vendidos</h3>${bars(groupSum(gan, p => p.tipo==='Mueble a Medida' ? 'Mueble · '+(p.madera||'s/madera') : (p.modelo || p.tipo)).slice(0,8))}</div>`;
   const org = groupSum(perP, p => (cliente(p)||{}).origen);
   html += `<div class="panel"><h3>¿Cómo nos conocieron? <span class="muted small">consultas · conversión</span></h3>${bars(org.map(([o,n]) => { const g = gan.filter(p => ((cliente(p)||{}).origen||'Sin dato')===o).length; return [o, n, Math.round(g/n*100)+'% conv.']; }))}</div>`;
@@ -494,6 +562,11 @@ function renderAjustes(v){
   $('#view').innerHTML = `<div class="grid g3">
     ${Object.keys(CFG_LABELS).map(k => `<div class="panel"><h3>${esc(CFG_LABELS[k])}</h3><textarea data-cfg="${k}" rows="6" placeholder="Uno por línea">${esc(cfg(k).join('\n'))}</textarea>
       <div class="small muted" style="margin-top:6px">Uno por línea</div></div>`).join('')}
+    <div class="panel span2"><h3>⭐ Reseñas en Google</h3>
+      <p class="small muted" style="margin-top:0">A los ${15} días de cada entrega aparece un recordatorio con este mensaje listo para mandar por WhatsApp. Usá <b>{nombre}</b>, <b>{producto}</b> y <b>{link}</b>: se completan solos.</p>
+      <label class="f"><span>Link para dejar reseña (Google Business → "Pedir reseñas")</span><input id="rs_link" placeholder="https://g.page/r/..." value="${esc(cfg('linkResena')[0]||'')}"></label>
+      <label class="f" style="margin-top:10px"><span>Mensaje</span><textarea id="rs_msg" rows="7">${esc(cfg('mensajeResena')[0] || DEF_MSG_RESENA)}</textarea></label>
+      <div class="row" style="margin-top:10px"><button class="btn pri" id="rs_save">Guardar mensaje</button><button class="btn ghost" id="rs_def">Restaurar mensaje sugerido</button></div></div>
     <div class="panel"><h3>Seguridad</h3><p class="small muted" style="margin-top:0">Ingresaste como <b>${esc(S.d.user)}</b>. Usuarios activos: ${esc((S.d.usuarios||[]).join(', '))}.<br>Los usuarios y contraseñas se crean, cambian o eliminan desde la planilla: menú <b>RUMA CRM</b>. Ahí también podés cerrar todas las sesiones abiertas.</p>
       <button class="btn" data-act="salir">Cerrar sesión</button></div>
     <div class="panel"><h3>Resumen diario por mail</h3><p class="small muted" style="margin-top:0">Todos los días a las 8 h te llega un mail con entregas atrasadas, entregas de la semana y recordatorios.</p>
@@ -502,6 +575,12 @@ function renderAjustes(v){
       <div class="row"><a class="btn" target="_blank" rel="noopener noreferrer" href="${esc(S.d.sheetUrl)}">📊 Abrir planilla</a><a class="btn" target="_blank" rel="noopener noreferrer" href="${esc(S.d.folderUrl)}">📁 Carpeta de fotos</a></div></div>
   </div>`;
   $('#saveCfg').onclick = () => { const c = {}; $$('[data-cfg]').forEach(t => c[t.dataset.cfg] = t.value.split('\n').map(s=>s.trim()).filter(Boolean)); run('saveConfig', {config:c}, 'Ajustes guardados'); };
+  $('#rs_def').onclick = () => { $('#rs_msg').value = DEF_MSG_RESENA; };
+  $('#rs_save').onclick = () => {
+    const link = $('#rs_link').value.trim();
+    if(link && !/^https:\/\/[^\s"'<>]+$/.test(link)) return toast('El link tiene que empezar con https://', true);
+    run('saveConfig', {config:{linkResena: link?[link]:[], mensajeResena:[$('#rs_msg').value.trim()]}}, 'Mensaje de reseña guardado');
+  };
   $('#resDia').onchange = e => run('setResumenDiario', {activo:e.target.checked}, e.target.checked ? 'Resumen diario activado' : 'Resumen diario desactivado');
 }
 
@@ -542,8 +621,8 @@ function renderPedidoModal(){
   if(m.tab==='datos') body = pedidoForm(P);
   else {
     body = `<div class="money"><div><div class="l">Precio</div><div class="v">${money(c.precio)}</div></div><div><div class="l">Pagado</div><div class="v" style="color:var(--ok)">${money(c.pagado)}</div></div>
-      <div><div class="l">Saldo</div><div class="v" style="color:${c.saldo>0?'var(--bad)':'var(--ok)'}">${money(c.saldo)}</div></div><div><div class="l">Costos</div><div class="v">${money(c.costos)}</div></div>
-      <div><div class="l">Ganancia</div><div class="v">${money(c.ganancia)}${c.precio?` <span class="small muted">${Math.round(c.ganancia/c.precio*100)}%</span>`:''}</div></div></div>`;
+      <div><div class="l">Saldo</div><div class="v" style="color:${c.saldo>0?'var(--bad)':'var(--ok)'}">${money(c.saldo)}</div></div><div><div class="l">A recibir</div><div class="v">${money(c.recibir)}</div></div><div><div class="l">Costos</div><div class="v">${money(c.costos)}</div></div>
+      <div><div class="l">Ganancia</div><div class="v">${money(c.ganancia)}${c.recibir?` <span class="small muted">${Math.round(c.ganancia/c.recibir*100)}%</span>`:''}</div></div></div>`;
     body += {pagos:tabPagos, costos:tabCostos, notas:tabNotas, fotos:tabFotos, recs:tabRecs, hist:tabHist}[m.tab](P, c);
   }
   $('#modal').innerHTML = `<div class="modal-card">${head}${pedidoTabs(P)}<div class="modal-body">${body}</div></div>`;
@@ -579,24 +658,52 @@ function pedidoForm(P){
     <label class="f s-sillon s-funda"><span>Color de funda</span><input id="p_colorFunda" value="${esc(d.colorFunda)}"></label>
     <label class="f s-mueble"><span>Madera</span><input id="p_madera" list="dlMad" value="${esc(d.madera)}"><datalist id="dlMad">${cfg('maderas').map(x=>`<option value="${esc(x)}">`).join('')}</datalist></label>
     <label class="f s-mueble"><span>Terminación</span><input id="p_term" list="dlTerm" value="${esc(d.terminacion)}"><datalist id="dlTerm">${cfg('terminaciones').map(x=>`<option value="${esc(x)}">`).join('')}</datalist></label>
-    <label class="f"><span>Medidas</span><input id="p_medidas" value="${esc(d.medidas)}" placeholder="Ej: 2,20 x 0,90 m"></label>
+    <label class="f"><span>Largo (cm)</span><select id="p_largo">${optsMedida(30, 400, d.largo)}</select></label>
+    <label class="f"><span>Profundidad (cm)</span><select id="p_prof">${optsMedida(30, 200, d.profundidad)}</select></label>
+    <label class="f"><span>Alto (cm)</span><select id="p_alto">${optsMedida(20, 250, d.alto)}</select></label>
+    ${d.medidas && !num(d.largo) && !num(d.profundidad) && !num(d.alto) ? `<div class="small muted" style="align-self:end;padding-bottom:10px">Medidas anteriores: <b>${esc(d.medidas)}</b></div>` : ''}
     <label class="f"><span>Cantidad</span><input id="p_cant" type="number" min="1" value="${esc(d.cantidad||1)}"></label>
     <label class="f spanall"><span>Detalles adicionales</span><textarea id="p_det" rows="2">${esc(d.detalles)}</textarea></label>
 
     <div class="sect">Comercial y fechas</div>
-    <label class="f"><span>Etapa</span><select id="p_etapa">${opts(ETAPAS, d.etapa)}</select></label>
-    <label class="f"><span>Precio total</span><input id="p_precio" type="number" min="0" step="1" value="${esc(d.precioTotal)}" placeholder="$"></label>
+    <label class="f"><span>Etapa</span><select id="p_etapa">${opts(ETAPAS, d.etapa==='Seña Confirmada'?'Confirmado':d.etapa)}</select></label>
     <label class="f"><span>Comercial</span><select id="p_com">${opts(cfg('comerciales'), d.comercial, '—')}</select></label>
+    <label class="f s-sena"><span>Seña (se registra como pago)</span><input id="p_sena" type="number" min="0" placeholder="$"></label>
     <span></span>
+
+    <div class="sect">Precio</div>
+    <label class="f"><span>Precio de lista</span><input id="p_lista" type="number" min="0" step="1" value="${esc(num(d.precioLista) ? d.precioLista : d.precioTotal)}" placeholder="$"></label>
+    <label class="f"><span>Forma de pago</span><select id="p_forma">${opts(FORMAS_PAGO, d.formaPago, '—')}</select></label>
+    <label class="f s-pct"><span id="p_pctLbl">%</span><input id="p_pct" type="number" min="0" max="100" step="0.5" value="${esc(d.ajustePct)}" placeholder="0"></label>
+    <div class="precio-box" id="p_resumen"></div>
     <label class="f"><span>Fecha de consulta</span><input id="p_fcons" type="date" value="${esc(d.fechaConsulta)}"></label>
     <label class="f"><span>Entrega estimada</span><input id="p_fest" type="date" value="${esc(d.fechaEntregaEstimada)}"></label>
     <label class="f"><span>Entrega real</span><input id="p_freal" type="date" value="${esc(d.fechaEntregaReal)}"></label>
-    ${!P.id ? `<label class="f"><span>Seña inicial (opcional)</span><input id="p_sena" type="number" min="0" placeholder="$"></label>` : '<span></span>'}
     <div class="spanall row" style="margin-top:8px"><span class="spacer"></span>${P.id?'':'<button class="btn" data-act="cerrar">Cancelar</button>'}<button class="btn pri" id="pSave">${P.id?'Guardar cambios':'Crear pedido'}</button></div>
   </div>`;
 }
+function optsMedida(min, max, sel){
+  let o = '<option value="">—</option>'; sel = num(sel);
+  for(let v=min; v<=max; v+=5) o += `<option value="${v}" ${v===sel?'selected':''}>${v}</option>`;
+  if(sel && (sel<min || sel>max || sel%5)) o += `<option value="${sel}" selected>${sel}</option>`;
+  return o;
+}
+function syncPrecio(){
+  const pr = precios($('#p_lista').value, $('#p_forma').value, $('#p_pct').value);
+  const t = tipoAjuste($('#p_forma').value);
+  $('.s-pct').classList.toggle('hidden', !t);
+  $('#p_pctLbl').textContent = t==='desc' ? '% de descuento al cliente' : '% de comisión (la absorbés vos)';
+  $('#p_resumen').innerHTML = num($('#p_lista').value) ? `
+    <div><span>Precio al cliente</span><b>${money(pr.cliente)}</b></div>
+    ${t==='desc'?`<div><span>Descuento</span><b style="color:var(--bad)">− ${money(pr.ajuste)}</b></div>`:''}
+    ${t==='com'?`<div><span>Comisión</span><b style="color:var(--bad)">− ${money(pr.ajuste)}</b></div>`:''}
+    <div class="tot"><span>Total a recibir</span><b>${money(pr.recibir)}</b></div>` : '<div class="muted small">Cargá el precio de lista para ver el cálculo.</div>';
+}
 function syncPedidoForm(){
   const tipo = $('#p_tipo').value;
+  const conf = ETAPAS.indexOf($('#p_etapa').value) >= 2 && !(S.modal.id && S.d.Pagos.some(x => x.pedidoId===S.modal.id));
+  $$('.s-sena').forEach(e => e.classList.toggle('hidden', !conf));
+  syncPrecio();
   $$('.s-sillon').forEach(e => e.classList.toggle('hidden', tipo!=='Sillón/Sofá'));
   $$('.s-mueble').forEach(e => e.classList.toggle('hidden', tipo!=='Mueble a Medida'));
   $$('.s-funda').forEach(e => e.classList.toggle('hidden', tipo!=='Sillón/Sofá' || $('#p_funda').value!=='Sí'));
@@ -613,20 +720,23 @@ function readPedidoForm(draftOnly){
     id: S.modal.id || undefined, esStock: stock?'SI':'NO', clienteId: stock ? '' : (match ? match.id : ''),
     tipo: $('#p_tipo').value, modelo: $('#p_modelo').value.trim(), tela: $('#p_tela').value.trim(), color: $('#p_color').value.trim(),
     metrosTela: $('#p_metros').value, funda: $('#p_funda').value, colorFunda: $('#p_colorFunda').value.trim(), madera: $('#p_madera').value.trim(),
-    terminacion: $('#p_term').value.trim(), medidas: $('#p_medidas').value.trim(), cantidad: $('#p_cant').value || 1, detalles: $('#p_det').value.trim(),
-    etapa: $('#p_etapa').value, precioTotal: $('#p_precio').value, comercial: $('#p_com').value,
+    terminacion: $('#p_term').value.trim(), largo: $('#p_largo').value, profundidad: $('#p_prof').value, alto: $('#p_alto').value,
+    cantidad: $('#p_cant').value || 1, detalles: $('#p_det').value.trim(),
+    etapa: $('#p_etapa').value, precioLista: $('#p_lista').value, formaPago: $('#p_forma').value,
+    ajustePct: tipoAjuste($('#p_forma').value) ? $('#p_pct').value : '', comercial: $('#p_com').value,
     fechaConsulta: $('#p_fcons').value, fechaEntregaEstimada: $('#p_fest').value, fechaEntregaReal: $('#p_freal').value
   };
   if(pedido.tipo!=='Sillón/Sofá'){ pedido.modelo=''; pedido.tela=''; pedido.color=''; pedido.metrosTela=''; pedido.funda=''; pedido.colorFunda=''; }
   if(pedido.tipo!=='Mueble a Medida'){ pedido.madera=''; pedido.terminacion=''; }
   const clienteNuevo = (!stock && !match && txt) ? readCliente('nc_') : null;
-  const sena = $('#p_sena') ? num($('#p_sena').value) : 0;
+  const sena = $('#p_sena') && !$('.s-sena').classList.contains('hidden') ? num($('#p_sena').value) : 0;
   return {pedido, clienteNuevo, sena, cliText: txt, draftOnly};
 }
 function bindPedidoTab(P){
   const tab = S.modal.tab;
   if(tab==='datos'){
-    ['#p_tipo','#p_funda','#p_stock'].forEach(s => $(s).onchange = syncPedidoForm);
+    ['#p_tipo','#p_funda','#p_stock','#p_etapa','#p_forma'].forEach(s => $(s).onchange = syncPedidoForm);
+    ['#p_lista','#p_pct'].forEach(s => $(s).oninput = syncPrecio);
     $('#p_cli').oninput = syncPedidoForm;
     syncPedidoForm();
     $('#pSave').onclick = async () => {
@@ -635,11 +745,8 @@ function bindPedidoTab(P){
       const d = await run('savePedido', {pedido:f.pedido, clienteNuevo:f.clienteNuevo}, P.id ? 'Pedido guardado' : 'Pedido creado');
       const saved = d.put.Pedidos[d.put.Pedidos.length-1];
       S.modal.draft = null;
-      if(!P.id){
-        S.modal.id = saved.id;
-        if(f.sena > 0){ await run('addPago', {pago:{pedidoId:saved.id, monto:f.sena, medio:cfg('medios')[0]||'', fecha:today(), nota:'Seña'}}, 'Seña registrada'); }
-        S.modal.tab = 'fotos'; renderModal();
-      }
+      if(f.sena > 0){ await run('addPago', {pago:{pedidoId:saved.id, monto:f.sena, medio:f.pedido.formaPago || cfg('medios')[0] || '', fecha:today(), nota:'Seña'}}, 'Seña registrada'); }
+      if(!P.id){ S.modal.id = saved.id; S.modal.tab = 'fotos'; renderModal(); }
     };
   }
   if(tab==='pagos'){
@@ -647,7 +754,16 @@ function bindPedidoTab(P){
     $$('[data-pgdel]').forEach(b => b.onclick = async () => { if(await confirmBox('¿Eliminar este pago?','Eliminar')) run('deletePago', {id:b.dataset.pgdel}, 'Pago eliminado'); });
   }
   if(tab==='costos'){
-    $('#csAdd').onclick = () => run('addCosto', {costo:{pedidoId:P.id, proveedorId:$('#cs_p').value, concepto:$('#cs_c').value.trim(), monto:num($('#cs_m').value), fecha:$('#cs_f').value, pagado:$('#cs_pg').checked?'SI':'NO'}}, 'Costo registrado');
+    const syncProv = () => $('#cs_new').classList.toggle('hidden', $('#cs_p').value!=='__nuevo');
+    $('#cs_p').onchange = syncProv; syncProv();
+    $('#csAdd').onclick = () => {
+      const nuevo = $('#cs_p').value==='__nuevo';
+      if(nuevo && !$('#cs_nn').value.trim()) return toast('Escribí el nombre del proveedor nuevo', true);
+      const ck = id => $(id).checked ? 'SI' : 'NO';
+      run('addCosto', {costo:{pedidoId:P.id, proveedorId: nuevo ? '' : $('#cs_p').value, concepto:$('#cs_c').value.trim(), monto:num($('#cs_m').value), fecha:$('#cs_f').value,
+        fechaPago:$('#cs_fp').value, pedidoProv:ck('#cs_pp'), recibido:ck('#cs_rc'), entregado:ck('#cs_en'), pagado:ck('#cs_pg')},
+        proveedorNuevo: nuevo ? {nombre:$('#cs_nn').value.trim(), especialidad:$('#cs_ne').value} : null}, nuevo ? 'Costo y proveedor nuevo registrados' : 'Costo registrado');
+    };
     bindCostos($('#modal'));
   }
   if(tab==='notas'){
@@ -678,26 +794,34 @@ function tabPagos(P, c){
       <label class="f"><span>Nota</span><input id="pg_n" placeholder="Seña, saldo, cuota…"></label>
       <div class="spanall"><button class="btn pri" id="pgAdd">+ Registrar pago</button></div></div></div>`;
 }
+const ESTADOS_COSTO = [['pedidoProv','Pedido'],['recibido','Recibido'],['entregado','Entregado'],['pagado','Pagado']];
 function costosTable(l, showPedido){
-  return l.length ? `<div class="tbl-wrap" style="margin-bottom:14px"><table><thead><tr><th>Fecha</th>${showPedido?'<th>Pedido</th>':'<th>Proveedor</th>'}<th>Concepto</th><th class="num">Monto</th><th>Pagado</th><th></th></tr></thead><tbody>
-    ${l.map(x=>{ const p = byId('Pedidos', x.pedidoId); return `<tr><td>${fmtD(x.fecha)}</td>${showPedido?`<td>${p?`<a href="#" data-openped="${esc(p.id)}">${esc(p.id)} · ${esc(p.clienteNombre)}</a>`:'—'}</td>`:`<td>${esc(x.proveedorNombre||'Sin proveedor')}</td>`}
-      <td>${esc(x.concepto)}</td><td class="num"><b>${money(x.monto)}</b></td><td><label class="row"><input type="checkbox" data-cstog="${esc(x.id)}" ${isSi(x.pagado)?'checked':''}> ${isSi(x.pagado)?'<span class="tag ok">Pagado</span>':'<span class="tag bad">Debo</span>'}</label></td>
+  return l.length ? `<div class="tbl-wrap" style="margin-bottom:14px"><table class="costos"><thead><tr><th>Fecha</th>${showPedido?'<th>Pedido</th>':'<th>Proveedor</th>'}<th>Concepto</th><th class="num">Monto</th><th>Fecha de pago</th>${ESTADOS_COSTO.map(([k,l])=>`<th class="ck">${l}</th>`).join('')}<th></th></tr></thead><tbody>
+    ${l.map(x=>{ const p = byId('Pedidos', x.pedidoId); const venc = x.fechaPago && !isSi(x.pagado) && x.fechaPago < today();
+      return `<tr><td>${fmtD(x.fecha)}</td>${showPedido?`<td>${p?`<a href="#" data-openped="${esc(p.id)}">${esc(p.id)} · ${esc(p.clienteNombre)}</a>`:'—'}</td>`:`<td>${esc(x.proveedorNombre||'Sin proveedor')}</td>`}
+      <td>${esc(x.concepto)}</td><td class="num"><b>${money(x.monto)}</b>${isSi(x.pagado)?'':'<div><span class="tag bad">Debo</span></div>'}</td>
+      <td><input type="date" class="fp ${venc?'venc':''}" data-fp="${esc(x.id)}" value="${esc(x.fechaPago||'')}" title="Agendá cuándo le pagás: aparece en el calendario"></td>
+      ${ESTADOS_COSTO.map(([k])=>`<td class="ck"><input type="checkbox" data-cstog="${esc(x.id)}" data-campo="${k}" ${isSi(x[k])?'checked':''}></td>`).join('')}
       <td><button class="btn sm ghost danger" data-csdel="${esc(x.id)}">✕</button></td></tr>`; }).join('')}
     </tbody></table></div>` : '<p class="muted">Sin costos registrados.</p>';
 }
 function bindCostos(root){
-  $$('[data-cstog]', root).forEach(b => b.onchange = () => run('toggleCostoPagado', {id:b.dataset.cstog}));
+  $$('[data-cstog]', root).forEach(b => b.onchange = () => run('toggleCosto', {id:b.dataset.cstog, campo:b.dataset.campo}));
+  $$('[data-fp]', root).forEach(i => i.onchange = () => run('setFechaPagoCosto', {id:i.dataset.fp, fechaPago:i.value}, i.value ? 'Pago agendado para el ' + fmtD(i.value).replace(/&#39;/g,"'") : 'Fecha de pago quitada'));
   $$('[data-csdel]', root).forEach(b => b.onclick = async () => { if(await confirmBox('¿Eliminar este costo?','Eliminar')) run('deleteCosto', {id:b.dataset.csdel}, 'Costo eliminado'); });
   $$('[data-openped]', root).forEach(a => a.onclick = e => { e.preventDefault(); openPedido(a.dataset.openped); });
 }
 function tabCostos(P){
   const l = S.d.Costos.filter(x=>x.pedidoId===P.id);
-  return `${costosTable(l)}<div class="panel"><h3>Registrar costo</h3><div class="grid g4" style="align-items:end">
-    <label class="f"><span>Proveedor</span><select id="cs_p"><option value="">Sin proveedor asociado</option>${S.d.Proveedores.map(v=>`<option value="${esc(v.id)}">${esc(v.nombre)} · ${esc(v.especialidad||'')}</option>`).join('')}</select></label>
+  return `${costosTable(l)}<div class="panel"><h3>Registrar costo / pedido a proveedor</h3><div class="grid g4" style="align-items:end">
+    <label class="f"><span>Proveedor</span><select id="cs_p"><option value="">Sin proveedor asociado</option>${S.d.Proveedores.map(v=>`<option value="${esc(v.id)}">${esc(v.nombre)} · ${esc(v.especialidad||'')}</option>`).join('')}<option value="__nuevo">➕ Nuevo proveedor…</option></select></label>
     <label class="f"><span>Concepto</span><input id="cs_c" placeholder="Tela, estructura, flete…"></label>
     <label class="f"><span>Monto</span><input type="number" id="cs_m" min="0"></label>
     <label class="f"><span>Fecha</span><input type="date" id="cs_f" value="${today()}"></label>
-    <label class="row"><input type="checkbox" id="cs_pg"> Ya lo pagué</label>
+    <div class="spanall newcli hidden" id="cs_new"><div class="small" style="margin-bottom:8px"><b>Proveedor nuevo</b> — se crea al registrar el costo. Después completás teléfono y demás en <b>Proveedores</b>.</div>
+      <div class="grid g2"><label class="f"><span>Nombre *</span><input id="cs_nn"></label><label class="f"><span>Especialidad</span><select id="cs_ne">${opts(cfg('especialidades'), '', '—')}</select></label></div></div>
+    <label class="f"><span>Fecha de pago (se agenda en el calendario)</span><input type="date" id="cs_fp"></label>
+    <div class="row spanall" style="gap:18px"><label class="row"><input type="checkbox" id="cs_pp"> Pedido</label><label class="row"><input type="checkbox" id="cs_rc"> Recibido</label><label class="row"><input type="checkbox" id="cs_en"> Entregado</label><label class="row"><input type="checkbox" id="cs_pg"> Pagado</label></div>
     <div class="spanall"><button class="btn pri" id="csAdd">+ Registrar costo</button></div></div></div>`;
 }
 function tabNotas(P){
@@ -763,7 +887,7 @@ function printOrden(P){
   const row = (l,v) => v ? `<tr><td style="width:35%"><b>${esc(l)}</b></td><td>${esc(v)}</td></tr>` : '';
   $('#print').innerHTML = `<h1>RUMA · Orden de trabajo ${esc(P.id)}</h1><p>Fecha: ${fmtD(today())} · Etapa: ${esc(P.etapa)} · Entrega estimada: <b>${fmtD(P.fechaEntregaEstimada)}</b></p>
     <h3>Cliente</h3><table style="border-collapse:collapse;width:100%">${row('Nombre', P.clienteNombre)}${row('Teléfono', c.telefono)}${row('Dirección de entrega', c.direccion)}</table>
-    <h3>Producto</h3><table style="border-collapse:collapse;width:100%">${row('Tipo', P.tipo)}${row('Modelo', P.modelo)}${row('Tela', P.tela)}${row('Color', P.color)}${row('Metros de tela', P.metrosTela)}${row('Funda', P.funda==='Sí' ? 'Sí · ' + (P.colorFunda||'') : '')}${row('Madera', P.madera)}${row('Terminación', P.terminacion)}${row('Medidas', P.medidas)}${row('Cantidad', P.cantidad)}${row('Detalles', P.detalles)}</table>
+    <h3>Producto</h3><table style="border-collapse:collapse;width:100%">${row('Tipo', P.tipo)}${row('Modelo', P.modelo)}${row('Tela', P.tela)}${row('Color', P.color)}${row('Metros de tela', P.metrosTela)}${row('Funda', P.funda==='Sí' ? 'Sí · ' + (P.colorFunda||'') : '')}${row('Madera', P.madera)}${row('Terminación', P.terminacion)}${row('Medidas', medidasTxt(P))}${row('Cantidad', P.cantidad)}${row('Detalles', P.detalles)}</table>
     <h3>Pagos</h3><table style="border-collapse:collapse;width:100%">${row('Precio total', money(k.precio))}${row('Pagado', money(k.pagado))}${row('Saldo a cobrar en la entrega', money(k.saldo))}</table>
     ${fotos.length?`<h3>Fotos</h3><div class="phs">${fotos.map(f=>`<img src="${esc(f.miniatura)}">`).join('')}</div>`:''}
     <p style="margin-top:30px">Firma / conformidad: ______________________________</p>`;
